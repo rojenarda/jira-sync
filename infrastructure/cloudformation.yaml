@@ -1,0 +1,376 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'JIRA Bidirectional Sync System Infrastructure'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+  
+  # JIRA Instance 1 Configuration
+  Jira1BaseUrl:
+    Type: String
+    Description: Base URL for JIRA instance 1
+    NoEcho: true
+  
+  Jira1Username:
+    Type: String
+    Description: Username for JIRA instance 1
+    NoEcho: true
+  
+  Jira1ApiToken:
+    Type: String
+    Description: API token for JIRA instance 1
+    NoEcho: true
+  
+  Jira1ProjectKey:
+    Type: String
+    Description: Project key for JIRA instance 1
+  
+  # JIRA Instance 2 Configuration
+  Jira2BaseUrl:
+    Type: String
+    Description: Base URL for JIRA instance 2
+    NoEcho: true
+  
+  Jira2Username:
+    Type: String
+    Description: Username for JIRA instance 2
+    NoEcho: true
+  
+  Jira2ApiToken:
+    Type: String
+    Description: API token for JIRA instance 2
+    NoEcho: true
+  
+  Jira2ProjectKey:
+    Type: String
+    Description: Project key for JIRA instance 2
+  
+  WebhookSecret:
+    Type: String
+    Description: Secret for webhook authentication
+    NoEcho: true
+
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 512
+    Runtime: python3.11
+    Environment:
+      Variables:
+        JIRA_1_BASE_URL: !Ref Jira1BaseUrl
+        JIRA_1_USERNAME: !Ref Jira1Username
+        JIRA_1_API_TOKEN: !Ref Jira1ApiToken
+        JIRA_1_PROJECT_KEY: !Ref Jira1ProjectKey
+        JIRA_2_BASE_URL: !Ref Jira2BaseUrl
+        JIRA_2_USERNAME: !Ref Jira2Username
+        JIRA_2_API_TOKEN: !Ref Jira2ApiToken
+        JIRA_2_PROJECT_KEY: !Ref Jira2ProjectKey
+        WEBHOOK_SECRET: !Ref WebhookSecret
+        DYNAMODB_TABLE_NAME: !Ref SyncStateTable
+        AWS_REGION: !Ref AWS::Region
+
+Resources:
+  # DynamoDB Table for Sync State
+  SyncStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${Environment}-jira-sync-state'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: sync_id
+          AttributeType: S
+        - AttributeName: jira_1_key
+          AttributeType: S
+        - AttributeName: jira_2_key
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sync_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: jira-1-key-index
+          KeySchema:
+            - AttributeName: jira_1_key
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: jira-2-key-index
+          KeySchema:
+            - AttributeName: jira_2_key
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: status-index
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: jira-sync
+
+  # IAM Role for Lambda Functions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: 
+                  - !GetAtt SyncStateTable.Arn
+                  - !Sub '${SyncStateTable.Arn}/index/*'
+
+  # Lambda Function for JIRA Webhooks
+  JiraWebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-jira-webhook-handler'
+      CodeUri: ../
+      Handler: main.jira_webhook_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        # API Gateway for JIRA 1 webhooks
+        Jira1WebhookApi:
+          Type: Api
+          Properties:
+            Path: /webhook/jira1
+            Method: post
+            RestApiId: !Ref WebhookApi
+        # API Gateway for JIRA 2 webhooks
+        Jira2WebhookApi:
+          Type: Api
+          Properties:
+            Path: /webhook/jira2
+            Method: post
+            RestApiId: !Ref WebhookApi
+
+  # Lambda Function for Scheduled Sync
+  ScheduledSyncFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-jira-scheduled-sync'
+      CodeUri: ../
+      Handler: main.scheduled_sync_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        # Retry failed syncs every 15 minutes
+        RetryFailedSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(15 minutes)
+            Input: '{"sync_type": "retry_failed"}'
+        # Full sync daily at 2 AM UTC
+        FullSyncSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 2 * * ? *)
+            Input: '{"sync_type": "full_sync"}'
+
+  # Lambda Function for Manual Operations
+  ManualSyncFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-jira-manual-sync'
+      CodeUri: ../
+      Handler: main.manual_sync_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        ManualSyncApi:
+          Type: Api
+          Properties:
+            Path: /manual-sync
+            Method: post
+            RestApiId: !Ref ManagementApi
+
+  # Health Check Function
+  HealthCheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-jira-health-check'
+      CodeUri: ../
+      Handler: main.health_check_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        HealthCheckApi:
+          Type: Api
+          Properties:
+            Path: /health
+            Method: get
+            RestApiId: !Ref ManagementApi
+
+  # API Gateway for Webhooks
+  WebhookApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub '${Environment}-jira-webhook-api'
+      StageName: !Ref Environment
+      Cors:
+        AllowMethods: "'POST, OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Hub-Signature-256'"
+        AllowOrigin: "'*'"
+
+  # API Gateway for Management Operations
+  ManagementApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub '${Environment}-jira-management-api'
+      StageName: !Ref Environment
+      Auth:
+        ApiKeyRequired: true
+      Cors:
+        AllowMethods: "'GET, POST, OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+
+  # API Key for Management API
+  ManagementApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    Properties:
+      Name: !Sub '${Environment}-jira-management-api-key'
+      Description: API key for JIRA sync management operations
+      Enabled: true
+
+  # Usage Plan for Management API
+  ManagementUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      UsagePlanName: !Sub '${Environment}-jira-management-usage-plan'
+      Description: Usage plan for JIRA sync management API
+      ApiStages:
+        - ApiId: !Ref ManagementApi
+          Stage: !Ref Environment
+      Throttle:
+        BurstLimit: 100
+        RateLimit: 50
+      Quota:
+        Limit: 10000
+        Period: DAY
+
+  # Link API Key to Usage Plan
+  ManagementUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref ManagementApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref ManagementUsagePlan
+
+  # CloudWatch Log Groups
+  WebhookLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${Environment}-jira-webhook-handler'
+      RetentionInDays: 30
+
+  ScheduledSyncLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${Environment}-jira-scheduled-sync'
+      RetentionInDays: 30
+
+  ManualSyncLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${Environment}-jira-manual-sync'
+      RetentionInDays: 30
+
+  HealthCheckLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${Environment}-jira-health-check'
+      RetentionInDays: 7
+
+  # CloudWatch Alarms
+  WebhookErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-jira-webhook-errors'
+      AlarmDescription: 'High error rate in JIRA webhook function'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref JiraWebhookFunction
+
+  SyncFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-jira-sync-failures'
+      AlarmDescription: 'High number of sync failures'
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 900
+      EvaluationPeriods: 3
+      Threshold: 250000  # 250 seconds
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ScheduledSyncFunction
+
+Outputs:
+  WebhookApiUrl:
+    Description: 'URL for JIRA webhook API'
+    Value: !Sub 'https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${Environment}-jira-webhook-api-url'
+
+  ManagementApiUrl:
+    Description: 'URL for management API'
+    Value: !Sub 'https://${ManagementApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${Environment}-jira-management-api-url'
+
+  ManagementApiKeyId:
+    Description: 'API Key ID for management operations'
+    Value: !Ref ManagementApiKey
+    Export:
+      Name: !Sub '${Environment}-jira-management-api-key-id'
+
+  DynamoDBTableName:
+    Description: 'DynamoDB table name for sync state'
+    Value: !Ref SyncStateTable
+    Export:
+      Name: !Sub '${Environment}-jira-sync-table-name'
+
+  # Webhook URLs for JIRA configuration
+  Jira1WebhookUrl:
+    Description: 'Webhook URL for JIRA instance 1'
+    Value: !Sub 'https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/webhook/jira1'
+
+  Jira2WebhookUrl:
+    Description: 'Webhook URL for JIRA instance 2'
+    Value: !Sub 'https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/webhook/jira2'

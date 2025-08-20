@@ -1,0 +1,56 @@
+[project]
+name = "jira-automation"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "ruff>=0.12.9",
+    "boto3>=1.35.0",
+    "pydantic>=2.9.0",
+    "requests>=2.32.0",
+    "structlog>=24.1.0",
+    "python-decouple>=3.8",
+    "cryptography>=43.0.0",
+    "pre-commit>=4.3.0",
+    "commitizen>=4.8.3",
+    "types-requests>=2.32.4.20250809",
+]
+
+# ---------------------------
+# Ruff (linting + formatting)
+# ---------------------------
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+fix = true
+
+[tool.ruff.lint]
+select = [
+    "F",   # Pyflakes
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "DTZ", # flake8-datetimez
+    "S",   # flake8-bandit (security)
+    "T20", # flake8-print (ban print)
+    "TID", # flake8-tidy-imports
+    "D",   # pydocstyle (docstrings)
+]
+
+ignore = [
+    "D203", # one-blank-line-before-class (conflicts with D211)
+    "D213"  # multi-line-summary-second-line
+]
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+version = "0.1.0"
+tag_format = "v$version"
+version_files = [
+  "pyproject.toml:version",
+]
