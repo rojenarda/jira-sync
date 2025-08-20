@@ -17,7 +17,7 @@ if [ -z "$JIRA_1_BASE_URL" ] || [ -z "$JIRA_1_USERNAME" ] || [ -z "$JIRA_1_API_T
     echo "Error: JIRA instance 1 configuration is incomplete"
     echo "Required environment variables:"
     echo "  JIRA_1_BASE_URL"
-    echo "  JIRA_1_USERNAME" 
+    echo "  JIRA_1_USERNAME"
     echo "  JIRA_1_API_TOKEN"
     echo "  JIRA_1_PROJECT_KEY"
     exit 1
@@ -28,7 +28,7 @@ if [ -z "$JIRA_2_BASE_URL" ] || [ -z "$JIRA_2_USERNAME" ] || [ -z "$JIRA_2_API_T
     echo "Required environment variables:"
     echo "  JIRA_2_BASE_URL"
     echo "  JIRA_2_USERNAME"
-    echo "  JIRA_2_API_TOKEN" 
+    echo "  JIRA_2_API_TOKEN"
     echo "  JIRA_2_PROJECT_KEY"
     exit 1
 fi

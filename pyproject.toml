@@ -13,7 +13,6 @@ dependencies = [
     "python-decouple>=3.8",
     "cryptography>=43.0.0",
     "pre-commit>=4.3.0",
-    "commitizen>=4.8.3",
     "types-requests>=2.32.4.20250809",
 ]
 

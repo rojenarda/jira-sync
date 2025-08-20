@@ -46,6 +46,39 @@ def verify_webhook_signature(payload: str, signature: str, secret: str) -> bool:
     return hmac.compare_digest(expected_signature, signature)
 
 
+def should_process_event(webhook_payload: WebhookPayload) -> bool:
+    """Determine if the webhook event should be processed."""
+    # Process issue creation and updates
+    relevant_events = [
+        "jira:issue_created",
+        "jira:issue_updated",
+        "jira:issue_deleted",  # You might want to handle deletions
+    ]
+
+    if webhook_payload.webhookEvent not in relevant_events:
+        return False
+
+    # Skip certain types of updates (optional)
+    # if webhook_payload.webhookEvent == "jira:issue_updated":
+    #     # Skip if only comment was added (optional)
+    #     if webhook_payload.issue_event_type_name == "issue_commented":
+    #         return False
+
+    #     # Skip workflow transitions that don't change content (optional)
+    #     # You can customize this based on your needs
+    #     if webhook_payload.changelog:
+    #         items = webhook_payload.changelog.get("items", [])
+    #         # Only process if there are meaningful field changes
+    #         meaningful_fields = {"summary", "description", "priority", "assignee", "labels", "components"}
+    #         for item in items:
+    #             if item.get("field") in meaningful_fields:
+    #                 return True
+    #         # If only status changes, you might want to skip or process
+    #         return len(items) > 0
+
+    return True
+
+
 def jira_webhook_handler(event: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
     """Lambda handler for JIRA webhook events."""
     try:
@@ -343,36 +376,3 @@ def determine_source_instance(event: dict[str, Any], config: SyncConfig) -> int:
     # Default to instance 1 (you might want to raise an error instead)
     logger.warning("Could not determine source instance, defaulting to 1")
     return 1
-
-
-def should_process_event(webhook_payload: WebhookPayload) -> bool:
-    """Determine if the webhook event should be processed."""
-    # Process issue creation and updates
-    relevant_events = [
-        "jira:issue_created",
-        "jira:issue_updated",
-        "jira:issue_deleted",  # You might want to handle deletions
-    ]
-
-    if webhook_payload.webhookEvent not in relevant_events:
-        return False
-
-    # Skip certain types of updates (optional)
-    if webhook_payload.webhookEvent == "jira:issue_updated":
-        # Skip if only comment was added (optional)
-        if webhook_payload.issue_event_type_name == "issue_commented":
-            return False
-
-        # Skip workflow transitions that don't change content (optional)
-        # You can customize this based on your needs
-        if webhook_payload.changelog:
-            items = webhook_payload.changelog.get("items", [])
-            # Only process if there are meaningful field changes
-            meaningful_fields = {"summary", "description", "priority", "assignee", "labels", "components"}
-            for item in items:
-                if item.get("field") in meaningful_fields:
-                    return True
-            # If only status changes, you might want to skip or process
-            return len(items) > 0
-
-    return True
