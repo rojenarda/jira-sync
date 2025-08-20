@@ -30,6 +30,12 @@ class SyncConfig(BaseModel):
     sync_interval_seconds: int = Field(default=300, description="Fallback sync interval in seconds")
     max_retries: int = Field(default=3, description="Maximum retry attempts")
     retry_delay_seconds: int = Field(default=5, description="Delay between retries")
+    sync_status_transitions: bool = Field(
+        default=True, description="Whether to sync status changes using JIRA transitions"
+    )
+    sync_assignee: bool = Field(
+        default=False, description="Whether to sync assignee (users may not exist in both instances)"
+    )
 
 
 def load_config() -> SyncConfig:
@@ -55,4 +61,6 @@ def load_config() -> SyncConfig:
         sync_interval_seconds=config("SYNC_INTERVAL_SECONDS", default=300, cast=int),
         max_retries=config("MAX_RETRIES", default=3, cast=int),
         retry_delay_seconds=config("RETRY_DELAY_SECONDS", default=5, cast=int),
+        sync_status_transitions=config("SYNC_STATUS_TRANSITIONS", default=True, cast=bool),
+        sync_assignee=config("SYNC_ASSIGNEE", default=False, cast=bool),
     )

@@ -58,23 +58,52 @@ def should_process_event(webhook_payload: WebhookPayload) -> bool:
     if webhook_payload.webhookEvent not in relevant_events:
         return False
 
-    # Skip certain types of updates (optional)
-    # if webhook_payload.webhookEvent == "jira:issue_updated":
-    #     # Skip if only comment was added (optional)
-    #     if webhook_payload.issue_event_type_name == "issue_commented":
-    #         return False
+    # For issue creation, always process
+    if webhook_payload.webhookEvent == "jira:issue_created":
+        return True
 
-    #     # Skip workflow transitions that don't change content (optional)
-    #     # You can customize this based on your needs
-    #     if webhook_payload.changelog:
-    #         items = webhook_payload.changelog.get("items", [])
-    #         # Only process if there are meaningful field changes
-    #         meaningful_fields = {"summary", "description", "priority", "assignee", "labels", "components"}
-    #         for item in items:
-    #             if item.get("field") in meaningful_fields:
-    #                 return True
-    #         # If only status changes, you might want to skip or process
-    #         return len(items) > 0
+    # For issue updates, check what changed
+    if webhook_payload.webhookEvent == "jira:issue_updated":
+        # Skip if only comment was added
+        if webhook_payload.issue_event_type_name == "issue_commented":
+            return False
+
+        # Process if there are meaningful field changes including status
+        if webhook_payload.changelog:
+            items = webhook_payload.changelog.get("items", [])
+            # Fields that should trigger sync
+            meaningful_fields = {
+                "summary",
+                "description",
+                "priority",
+                # "assignee",
+                "labels",
+                "components",
+                "fixVersions",
+                "status",  # Include status changes
+                "resolution",
+            }
+
+            for item in items:
+                field_name = item.get("field", "")
+                if field_name in meaningful_fields:
+                    # Log status changes for debugging
+                    if field_name == "status":
+                        logger.info(
+                            "Status change detected in webhook",
+                            from_status=item.get("fromString"),
+                            to_status=item.get("toString"),
+                            issue_key=webhook_payload.issue.get("key"),
+                        )
+                    return True
+
+            # If no meaningful changes found
+            logger.debug(
+                "No meaningful field changes detected",
+                changed_fields=[item.get("field") for item in items],
+                issue_key=webhook_payload.issue.get("key"),
+            )
+            return False
 
     return True
 

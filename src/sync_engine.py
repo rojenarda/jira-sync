@@ -25,8 +25,8 @@ class SyncEngine:
     def __init__(self, config: SyncConfig) -> None:
         """Initialize sync engine."""
         self.config = config
-        self.jira_1 = JiraClient(config.jira_instance_1)
-        self.jira_2 = JiraClient(config.jira_instance_2)
+        self.jira_1 = JiraClient(config.jira_instance_1, sync_assignee=config.sync_assignee)
+        self.jira_2 = JiraClient(config.jira_instance_2, sync_assignee=config.sync_assignee)
         self.storage = DynamoDBStorage(config.dynamodb)
 
     def initialize(self) -> None:
@@ -194,16 +194,22 @@ class SyncEngine:
             # Get current target issue
             target_issue = target_client.get_issue(target_key)
 
-            # Generate update payload
+            # Check if any changes are needed (including status)
             update_payload = target_client.convert_to_update_payload(target_issue, source_issue)
+            status_changed = self.config.sync_status_transitions and target_issue.status != source_issue.status
 
-            if not update_payload.get("fields"):
+            if not update_payload.get("fields") and not status_changed:
                 # No changes needed
                 logger.info("No changes detected, skipping update", target_key=target_key)
                 sync_record.status = SyncStatus.SUCCESS
             else:
-                # Apply updates
-                updated_target = target_client.update_issue(target_key, update_payload)
+                # Apply updates including status transitions (if configured)
+                if status_changed:
+                    updated_target = target_client.apply_issue_updates(target_key, target_issue, source_issue)
+                else:
+                    # Only update fields, skip status
+                    updated_target = target_client.update_issue(target_key, update_payload)
+                    updated_target = target_client.get_issue(target_key)
 
                 # Update sync record
                 if target_instance == 1:
@@ -212,10 +218,17 @@ class SyncEngine:
                     sync_record.jira_2_last_updated = updated_target.updated
 
                 sync_record.status = SyncStatus.SUCCESS
+
+                # Log what was updated
+                updated_fields = list(update_payload.get("fields", {}).keys())
+                if status_changed:
+                    updated_fields.append("status")
+
                 logger.info(
                     "Issue update sync completed",
                     source_key=source_issue.key,
                     target_key=target_key,
+                    updated_fields=updated_fields,
                 )
 
             if source_instance == 1:

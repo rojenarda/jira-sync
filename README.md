@@ -7,6 +7,7 @@ A production-grade system for bidirectional synchronization between two JIRA ins
 - **Bidirectional Sync**: Automatically syncs issues between two JIRA instances
 - **Real-time Updates**: Webhook-driven sync for immediate updates
 - **Conflict Resolution**: Detects and handles conflicts when both instances are updated simultaneously
+- **Serverless Architecture**: AWS Lambda and DynamoDB for scalability and cost-efficiency
 - **Type Safe**: Full type annotations and validation using Pydantic
 
 ## Architecture
@@ -56,6 +57,10 @@ JIRA_2_API_TOKEN=your-api-token-here
 JIRA_2_PROJECT_KEY=PROJ2
 
 WEBHOOK_SECRET=your-secure-webhook-secret-here
+
+# Optional: Status transition configuration
+SYNC_STATUS_TRANSITIONS=true
+SYNC_ASSIGNEE=false
 ```
 
 ### 2. Deploy to AWS
@@ -121,7 +126,10 @@ When a new issue is created in either instance, it's automatically replicated to
 ### Updated Issues
 When an issue is updated, changes are synchronized including:
 - Field modifications
-- Status transitions
+- **Status transitions** (using JIRA transition API)
+- Priority, labels, components, fix versions
+- Custom fields
+- Assignee (optional, configurable)
 - Comment additions (optional)
 
 ### Conflict Resolution
@@ -261,6 +269,40 @@ python main.py
 - Lambda functions are optimized for cold start performance
 - CloudWatch logs have appropriate retention periods
 - No persistent infrastructure costs
+
+## Status Transitions
+
+The system handles JIRA status changes using the **transitions API**, which respects your workflow rules.
+
+### How It Works
+1. **Detects status changes** via webhooks
+2. **Finds valid transition** to target status
+3. **Executes transition** using JIRA API
+4. **Logs success/failure** for monitoring
+
+### Testing Transitions
+```bash
+# Test available transitions for an issue
+python scripts/test-transitions.py PROJ-123 1
+
+# Test transition to specific status
+python scripts/test-transitions.py PROJ-123 1 "In Progress"
+```
+
+### Configuration
+```env
+# Enable/disable status synchronization
+SYNC_STATUS_TRANSITIONS=true
+
+# Enable/disable assignee synchronization
+SYNC_ASSIGNEE=false
+```
+
+### Workflow Considerations
+- **Any-to-any transitions**: Assumes any status can transition to any other status
+- **Workflow validation**: JIRA will reject invalid transitions
+- **Failed transitions**: Logged as warnings, don't fail the entire sync
+- **Transition permissions**: Ensure API user has transition permissions
 
 ## Customization
 

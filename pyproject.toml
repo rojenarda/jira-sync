@@ -53,3 +53,8 @@ tag_format = "v$version"
 version_files = [
   "pyproject.toml:version",
 ]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.30.1",
+]

@@ -69,3 +69,6 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+commencis_metadata
+test.ipynb
