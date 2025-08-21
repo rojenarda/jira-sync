@@ -24,6 +24,20 @@ class SyncStatus(str, Enum):
     CONFLICT = "conflict"
 
 
+class JiraComment(BaseModel):
+    """Standardized JIRA comment representation."""
+
+    id: str
+    body: str
+    author_name: str
+    author_email: str | None = None
+    created: datetime
+    updated: datetime
+    is_sync_comment: bool = Field(default=False, description="Whether this comment was created by sync")
+    original_author: str | None = Field(default=None, description="Original author for synced comments")
+    sync_source_id: str | None = Field(default=None, description="Original comment ID from source instance")
+
+
 class JiraIssue(BaseModel):
     """Standardized JIRA issue representation."""
 
@@ -42,6 +56,7 @@ class JiraIssue(BaseModel):
     created: datetime
     updated: datetime
     resolution: str | None = None
+    comments: list[JiraComment] = Field(default_factory=list)
 
 
 class SyncRecord(BaseModel):
@@ -81,6 +96,21 @@ class WebhookPayload(BaseModel):
     issue: dict[str, Any]
     user: dict[str, Any]
     changelog: dict[str, Any] | None = None
+
+
+class CommentSyncRecord(BaseModel):
+    """Record of comment synchronization to prevent loops."""
+
+    # Partition key: issue_key#comment_id#target_instance
+    sync_id: str = Field(..., description="Unique comment sync identifier")
+    issue_key: str
+    source_comment_id: str
+    target_comment_id: str | None = None
+    source_instance: int  # 1 or 2
+    target_instance: int  # 1 or 2
+    last_sync_timestamp: datetime
+    sync_direction: SyncDirection
+    status: SyncStatus
 
 
 class SyncResult(BaseModel):

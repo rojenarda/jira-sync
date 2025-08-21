@@ -9,7 +9,7 @@ from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError, NoCredentialsError
 
 from .config import DynamoDBConfig
-from .models import SyncDirection, SyncRecord, SyncStatus
+from .models import CommentSyncRecord, SyncDirection, SyncRecord, SyncStatus
 
 logger = structlog.get_logger()
 
@@ -134,6 +134,83 @@ class DynamoDBStorage:
             error_msg = f"Failed to get sync record {sync_id}: {e}"
             logger.error("Error getting sync record", error=error_msg)
             raise StorageError(error_msg) from e
+
+    def save_comment_sync_record(self, record: CommentSyncRecord) -> None:
+        """Save comment sync record to DynamoDB."""
+        try:
+            item = self._comment_sync_record_to_item(record)
+
+            logger.info(
+                "Saving comment sync record",
+                sync_id=record.sync_id,
+                issue_key=record.issue_key,
+                comment_id=record.source_comment_id,
+            )
+
+            self.table.put_item(Item=item)
+
+        except ClientError as e:
+            error_msg = f"Failed to save comment sync record {record.sync_id}: {e}"
+            logger.error("Error saving comment sync record", error=error_msg)
+            raise StorageError(error_msg) from e
+
+    def get_comment_sync_record(self, sync_id: str) -> CommentSyncRecord | None:
+        """Get comment sync record by sync_id."""
+        try:
+            response = self.table.get_item(Key={"sync_id": sync_id})
+
+            if "Item" not in response:
+                return None
+
+            return self._item_to_comment_sync_record(response["Item"])
+
+        except ClientError as e:
+            error_msg = f"Failed to get comment sync record {sync_id}: {e}"
+            logger.error("Error getting comment sync record", error=error_msg)
+            raise StorageError(error_msg) from e
+
+    def find_comment_sync_by_source(
+        self, issue_key: str, source_comment_id: str, source_instance: int
+    ) -> CommentSyncRecord | None:
+        """Find comment sync record by source comment."""
+        sync_id = self._generate_comment_sync_id(issue_key, source_comment_id, source_instance)
+        return self.get_comment_sync_record(sync_id)
+
+    def _generate_comment_sync_id(self, issue_key: str, comment_id: str, target_instance: int) -> str:
+        """Generate comment sync ID."""
+        return f"{issue_key}#{comment_id}#{target_instance}"
+
+    def _comment_sync_record_to_item(self, record: CommentSyncRecord) -> dict[str, Any]:
+        """Convert CommentSyncRecord to DynamoDB item."""
+        item = {
+            "sync_id": record.sync_id,
+            "issue_key": record.issue_key,
+            "source_comment_id": record.source_comment_id,
+            "source_instance": record.source_instance,
+            "target_instance": record.target_instance,
+            "last_sync_timestamp": record.last_sync_timestamp.isoformat(),
+            "sync_direction": record.sync_direction.value,
+            "status": record.status.value,
+        }
+
+        if record.target_comment_id:
+            item["target_comment_id"] = record.target_comment_id
+
+        return item
+
+    def _item_to_comment_sync_record(self, item: dict[str, Any]) -> CommentSyncRecord:
+        """Convert DynamoDB item to CommentSyncRecord."""
+        return CommentSyncRecord(
+            sync_id=item["sync_id"],
+            issue_key=item["issue_key"],
+            source_comment_id=item["source_comment_id"],
+            target_comment_id=item.get("target_comment_id"),
+            source_instance=item["source_instance"],
+            target_instance=item["target_instance"],
+            last_sync_timestamp=datetime.fromisoformat(item["last_sync_timestamp"]),
+            sync_direction=SyncDirection(item["sync_direction"]),
+            status=SyncStatus(item["status"]),
+        )
 
     def find_sync_record_by_jira_key(
         self,

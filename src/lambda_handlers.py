@@ -64,9 +64,9 @@ def should_process_event(webhook_payload: WebhookPayload) -> bool:
 
     # For issue updates, check what changed
     if webhook_payload.webhookEvent == "jira:issue_updated":
-        # Skip if only comment was added
+        # Handle comment events separately
         if webhook_payload.issue_event_type_name == "issue_commented":
-            return False
+            return True  # Process comment events
 
         # Process if there are meaningful field changes including status
         if webhook_payload.changelog:
@@ -106,6 +106,69 @@ def should_process_event(webhook_payload: WebhookPayload) -> bool:
             return False
 
     return True
+
+
+def handle_comment_event(webhook_payload: WebhookPayload, sync_engine, source_instance: int) -> bool:
+    """Handle comment-related webhook events."""
+    try:
+        # Extract comment information from changelog
+        if not webhook_payload.changelog:
+            logger.warning("No changelog found for comment event")
+            return False
+
+        items = webhook_payload.changelog.get("items", [])
+        comment_item = None
+
+        # Find comment-related changelog item
+        for item in items:
+            if item.get("field") == "comment":
+                comment_item = item
+                break
+
+        if not comment_item:
+            logger.warning("No comment changelog item found")
+            return False
+
+        # Determine event type based on changelog
+        from_string = comment_item.get("fromString", "")
+        to_string = comment_item.get("toString", "")
+
+        if not from_string and to_string:
+            event_type = "created"
+            comment_id = comment_item.get("to")
+        elif from_string and to_string:
+            event_type = "updated"
+            comment_id = comment_item.get("to")
+        elif from_string and not to_string:
+            event_type = "deleted"
+            comment_id = comment_item.get("from")
+        else:
+            logger.warning("Unknown comment event type", from_string=from_string, to_string=to_string)
+            return False
+
+        if not comment_id:
+            logger.warning("No comment ID found in changelog")
+            return False
+
+        issue_key = webhook_payload.issue.get("key")
+        if not issue_key:
+            logger.warning("No issue key found for comment event")
+            return False
+
+        logger.info(
+            "Processing comment event",
+            event_type=event_type,
+            comment_id=comment_id,
+            issue_key=issue_key,
+            source_instance=source_instance,
+        )
+
+        # Sync the comment
+        return sync_engine.sync_comment_from_webhook(issue_key, comment_id, source_instance, event_type)
+
+    except Exception as e:
+        logger.error("Error handling comment event", error=str(e))
+        return False
 
 
 def jira_webhook_handler(event: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -171,6 +234,22 @@ def jira_webhook_handler(event: dict[str, Any], context: dict[str, Any]) -> dict
 
         # Process the sync
         sync_engine = get_sync_engine()
+
+        # Handle comment events
+        if webhook_payload.issue_event_type_name == "issue_commented":
+            comment_success = handle_comment_event(webhook_payload, sync_engine, source_instance)
+            if comment_success:
+                return {
+                    "statusCode": 200,
+                    "body": json.dumps({"message": "Comment sync completed successfully"}),
+                }
+            else:
+                return {
+                    "statusCode": 500,
+                    "body": json.dumps({"error": "Comment sync failed"}),
+                }
+
+        # Handle regular issue sync
         result = sync_engine.sync_issue_from_webhook(issue_key, source_instance)
 
         if result.success:

@@ -36,6 +36,7 @@ class SyncConfig(BaseModel):
     sync_assignee: bool = Field(
         default=False, description="Whether to sync assignee (users may not exist in both instances)"
     )
+    sync_comments: bool = Field(default=True, description="Whether to sync comments between instances")
 
 
 def load_config() -> SyncConfig:
@@ -63,4 +64,5 @@ def load_config() -> SyncConfig:
         retry_delay_seconds=config("RETRY_DELAY_SECONDS", default=5, cast=int),
         sync_status_transitions=config("SYNC_STATUS_TRANSITIONS", default=True, cast=bool),
         sync_assignee=config("SYNC_ASSIGNEE", default=False, cast=bool),
+        sync_comments=config("SYNC_COMMENTS", default=True, cast=bool),
     )

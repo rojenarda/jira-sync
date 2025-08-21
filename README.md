@@ -58,9 +58,10 @@ JIRA_2_PROJECT_KEY=PROJ2
 
 WEBHOOK_SECRET=your-secure-webhook-secret-here
 
-# Optional: Status transition configuration
+# Optional: Sync behavior configuration
 SYNC_STATUS_TRANSITIONS=true
 SYNC_ASSIGNEE=false
+SYNC_COMMENTS=true
 ```
 
 ### 2. Deploy to AWS
@@ -127,10 +128,10 @@ When a new issue is created in either instance, it's automatically replicated to
 When an issue is updated, changes are synchronized including:
 - Field modifications
 - **Status transitions** (using JIRA transition API)
+- **Comment synchronization** (create, update, delete with author attribution)
 - Priority, labels, components, fix versions
 - Custom fields
 - Assignee (optional, configurable)
-- Comment additions (optional)
 
 ### Conflict Resolution
 When both instances have updates since the last sync:
@@ -296,6 +297,9 @@ SYNC_STATUS_TRANSITIONS=true
 
 # Enable/disable assignee synchronization
 SYNC_ASSIGNEE=false
+
+# Enable/disable comment synchronization
+SYNC_COMMENTS=true
 ```
 
 ### Workflow Considerations
@@ -303,6 +307,46 @@ SYNC_ASSIGNEE=false
 - **Workflow validation**: JIRA will reject invalid transitions
 - **Failed transitions**: Logged as warnings, don't fail the entire sync
 - **Transition permissions**: Ensure API user has transition permissions
+
+## Comment Synchronization
+
+The system synchronizes comments between JIRA instances with **author attribution** and **loop prevention**.
+
+### How It Works
+1. **Detects comment events** via webhooks (create, update, delete)
+2. **Preserves authorship** by adding original author information
+3. **Prevents infinite loops** by marking and skipping sync comments
+4. **Handles all operations** including comment updates and deletions
+
+### Comment Format
+Synced comments include metadata about the original author:
+```
+[JIRA-SYNC] Original author: John Doe (john.doe@company.com)
+[JIRA-SYNC] Source ID: 12345
+[JIRA-SYNC] From: JIRA-1 (https://company.atlassian.net)
+[JIRA-SYNC] Created: 2024-01-15 10:30:45 UTC
+
+---
+
+This is the original comment content from the other JIRA instance.
+```
+
+### Loop Prevention
+- Comments marked with `[JIRA-SYNC]` are **never re-synced**
+- Each comment has a **unique sync record** in DynamoDB
+- **Source tracking** prevents circular synchronization
+- **Failed syncs** are logged but don't break the system
+
+### Configuration
+```env
+# Enable/disable comment synchronization
+SYNC_COMMENTS=true
+```
+
+### Webhook Events
+Ensure these comment events are configured in JIRA webhooks:
+- **Issue updated** (includes comment changes)
+- The system automatically detects comment create/update/delete from changelog
 
 ## Customization
 

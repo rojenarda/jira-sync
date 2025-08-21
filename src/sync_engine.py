@@ -8,6 +8,8 @@ import structlog
 from .config import SyncConfig
 from .jira_client import JiraAPIError, JiraClient
 from .models import (
+    CommentSyncRecord,
+    JiraComment,
     JiraIssue,
     SyncDirection,
     SyncRecord,
@@ -496,3 +498,252 @@ class SyncEngine:
             record.jira_2_key = issue_key
 
         return record
+
+    def sync_comment_from_webhook(
+        self,
+        issue_key: str,
+        comment_id: str,
+        source_instance: int,
+        event_type: str = "created",  # created, updated, deleted
+    ) -> bool:
+        """Sync a comment triggered by webhook."""
+        # Check if comment sync is enabled
+        if not self.config.sync_comments:
+            logger.info("Comment sync disabled, skipping", comment_id=comment_id)
+            return True
+
+        logger.info(
+            "Starting comment sync",
+            issue_key=issue_key,
+            comment_id=comment_id,
+            source_instance=source_instance,
+            event_type=event_type,
+        )
+
+        if source_instance not in (1, 2):
+            raise ValueError("source_instance must be 1 or 2")
+
+        try:
+            source_client = self.jira_1 if source_instance == 1 else self.jira_2
+            target_client = self.jira_2 if source_instance == 1 else self.jira_1
+            target_instance = 2 if source_instance == 1 else 1
+
+            # Get source issue with target key for sync
+            source_sync_record = self.storage.find_sync_record_by_jira_key(issue_key, source_instance)
+            if not source_sync_record:
+                logger.warning("No sync record found for issue, skipping comment sync", issue_key=issue_key)
+                return False
+
+            target_issue_key = source_sync_record.jira_2_key if source_instance == 1 else source_sync_record.jira_1_key
+
+            if not target_issue_key:
+                logger.warning("No target issue key found, skipping comment sync", issue_key=issue_key)
+                return False
+
+            # Check if this comment was already synced to prevent loops
+            existing_comment_sync = self.storage.find_comment_sync_by_source(issue_key, comment_id, target_instance)
+
+            if existing_comment_sync:
+                logger.info("Comment already synced, skipping", comment_id=comment_id)
+                return True
+
+            if event_type == "deleted":
+                return self._handle_comment_deletion(
+                    issue_key, comment_id, source_instance, target_issue_key, target_client
+                )
+
+            # Get the source comment
+            try:
+                source_comment = source_client.get_comment(issue_key, comment_id)
+            except JiraAPIError as e:
+                if "comment not found" in str(e).lower():
+                    logger.info("Source comment deleted, handling as deletion", comment_id=comment_id)
+                    return self._handle_comment_deletion(
+                        issue_key, comment_id, source_instance, target_issue_key, target_client
+                    )
+                raise
+
+            # Skip sync comments to prevent infinite loops
+            if source_comment.is_sync_comment:
+                logger.info("Skipping sync comment to prevent loop", comment_id=comment_id)
+                return True
+
+            # Determine source instance name for attribution
+            source_instance_name = (
+                f"JIRA-1 ({self.config.jira_instance_1.base_url})"
+                if source_instance == 1
+                else f"JIRA-2 ({self.config.jira_instance_2.base_url})"
+            )
+
+            if event_type == "created":
+                return self._sync_new_comment(
+                    source_comment,
+                    issue_key,
+                    target_issue_key,
+                    source_instance,
+                    target_instance,
+                    target_client,
+                    source_instance_name,
+                )
+            elif event_type == "updated":
+                return self._sync_updated_comment(
+                    source_comment,
+                    issue_key,
+                    target_issue_key,
+                    source_instance,
+                    target_instance,
+                    target_client,
+                    source_instance_name,
+                )
+
+            logger.warning("Unknown comment event type", event_type=event_type)
+            return False
+
+        except (JiraAPIError, StorageError) as e:
+            logger.error("Comment sync failed", error=str(e), comment_id=comment_id)
+            return False
+
+    def _sync_new_comment(
+        self,
+        source_comment: JiraComment,
+        source_issue_key: str,
+        target_issue_key: str,
+        source_instance: int,
+        target_instance: int,
+        target_client,
+        source_instance_name: str,
+    ) -> bool:
+        """Sync a new comment to the target instance."""
+        try:
+            # Create sync comment in target
+            target_comment = target_client.create_sync_comment(target_issue_key, source_comment, source_instance_name)
+
+            # Create comment sync record
+            direction = SyncDirection.JIRA_1_TO_2 if source_instance == 1 else SyncDirection.JIRA_2_TO_1
+            comment_sync_record = CommentSyncRecord(
+                sync_id=self.storage._generate_comment_sync_id(source_issue_key, source_comment.id, target_instance),
+                issue_key=source_issue_key,
+                source_comment_id=source_comment.id,
+                target_comment_id=target_comment.id,
+                source_instance=source_instance,
+                target_instance=target_instance,
+                last_sync_timestamp=datetime.now(UTC),
+                sync_direction=direction,
+                status=SyncStatus.SUCCESS,
+            )
+
+            self.storage.save_comment_sync_record(comment_sync_record)
+
+            logger.info(
+                "Comment sync completed",
+                source_comment_id=source_comment.id,
+                target_comment_id=target_comment.id,
+                source_issue=source_issue_key,
+                target_issue=target_issue_key,
+            )
+
+            return True
+
+        except Exception as e:
+            logger.error("Failed to sync new comment", error=str(e))
+            return False
+
+    def _sync_updated_comment(
+        self,
+        source_comment: JiraComment,
+        source_issue_key: str,
+        target_issue_key: str,
+        source_instance: int,
+        target_instance: int,
+        target_client,
+        source_instance_name: str,
+    ) -> bool:
+        """Sync an updated comment to the target instance."""
+        try:
+            # Find existing comment sync record
+            comment_sync = self.storage.find_comment_sync_by_source(
+                source_issue_key, source_comment.id, target_instance
+            )
+
+            if not comment_sync or not comment_sync.target_comment_id:
+                logger.warning("No target comment found for update, creating new", comment_id=source_comment.id)
+                return self._sync_new_comment(
+                    source_comment,
+                    source_issue_key,
+                    target_issue_key,
+                    source_instance,
+                    target_instance,
+                    target_client,
+                    source_instance_name,
+                )
+
+            # Update the target comment
+            updated_body = (
+                f"[JIRA-SYNC] Original author: {source_comment.author_name}"
+                f"{f' ({source_comment.author_email})' if source_comment.author_email else ''}\n"
+                f"[JIRA-SYNC] Source ID: {source_comment.id}\n"
+                f"[JIRA-SYNC] From: {source_instance_name}\n"
+                f"[JIRA-SYNC] Created: {source_comment.created.strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+                f"[JIRA-SYNC] Updated: {source_comment.updated.strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+                f"---\n\n"
+                f"{source_comment.body}"
+            )
+
+            target_client.update_comment(target_issue_key, comment_sync.target_comment_id, updated_body)
+
+            # Update sync record
+            comment_sync.last_sync_timestamp = datetime.now(UTC)
+            comment_sync.status = SyncStatus.SUCCESS
+            self.storage.save_comment_sync_record(comment_sync)
+
+            logger.info(
+                "Comment update sync completed",
+                source_comment_id=source_comment.id,
+                target_comment_id=comment_sync.target_comment_id,
+            )
+
+            return True
+
+        except Exception as e:
+            logger.error("Failed to sync comment update", error=str(e))
+            return False
+
+    def _handle_comment_deletion(
+        self,
+        source_issue_key: str,
+        source_comment_id: str,
+        source_instance: int,
+        target_issue_key: str,
+        target_client,
+    ) -> bool:
+        """Handle comment deletion by deleting the corresponding synced comment."""
+        try:
+            target_instance = 2 if source_instance == 1 else 1
+
+            # Find the synced comment
+            comment_sync = self.storage.find_comment_sync_by_source(
+                source_issue_key, source_comment_id, target_instance
+            )
+
+            if not comment_sync or not comment_sync.target_comment_id:
+                logger.info("No synced comment found for deletion", comment_id=source_comment_id)
+                return True
+
+            # Delete the target comment
+            try:
+                target_client.delete_comment(target_issue_key, comment_sync.target_comment_id)
+                logger.info(
+                    "Deleted synced comment",
+                    source_comment_id=source_comment_id,
+                    target_comment_id=comment_sync.target_comment_id,
+                )
+            except JiraAPIError as e:
+                if "comment not found" not in str(e).lower():
+                    raise
+                logger.info("Target comment already deleted", comment_id=comment_sync.target_comment_id)
+
+            return True
+
+        except Exception as e:
+            logger.error("Failed to handle comment deletion", error=str(e))
+            return False

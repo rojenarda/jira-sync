@@ -1,5 +1,6 @@
 """JIRA API client for sync operations."""
 
+import re
 import time
 from datetime import datetime
 from typing import Any
@@ -9,7 +10,7 @@ import structlog
 from requests.auth import HTTPBasicAuth
 
 from .config import JiraConfig
-from .models import JiraIssue
+from .models import JiraComment, JiraIssue
 
 logger = structlog.get_logger()
 
@@ -277,6 +278,9 @@ class JiraClient:
         resolution = fields.get("resolution", {})
         resolution_name = resolution.get("name") if resolution else None
 
+        # Extract comments
+        comments = self._parse_comments(issue_data.get("fields", {}).get("comment", {}).get("comments", []))
+
         return JiraIssue(
             key=issue_data["key"],
             summary=summary,
@@ -293,6 +297,7 @@ class JiraClient:
             created=created,
             updated=updated,
             resolution=resolution_name,
+            comments=comments,
         )
 
     def _extract_custom_fields(self, fields: dict[str, Any]) -> dict[str, Any]:
@@ -313,6 +318,151 @@ class JiraClient:
                         custom_fields[key] = value
 
         return custom_fields
+
+    def _parse_comments(self, comments_data: list[dict[str, Any]]) -> list[JiraComment]:
+        """Parse JIRA comments data into our standardized model."""
+        comments = []
+
+        for comment_data in comments_data:
+            # Extract comment body (handle both string and ADF format)
+            body = comment_data.get("body", "")
+            if isinstance(body, dict):
+                # Handle Atlassian Document Format (ADF)
+                body = self._extract_text_from_adf(body)
+
+            # Extract author information
+            author = comment_data.get("author", {})
+            author_name = author.get("displayName", "Unknown")
+            author_email = author.get("emailAddress")
+
+            # Extract timestamps
+            created = datetime.fromisoformat(comment_data["created"].replace("Z", "+00:00"))
+            updated = datetime.fromisoformat(comment_data["updated"].replace("Z", "+00:00"))
+
+            # Check if this is a sync comment
+            is_sync_comment = self._is_sync_comment(body)
+            original_author = self._extract_original_author(body) if is_sync_comment else None
+            sync_source_id = self._extract_sync_source_id(body) if is_sync_comment else None
+
+            comments.append(
+                JiraComment(
+                    id=comment_data["id"],
+                    body=body,
+                    author_name=author_name,
+                    author_email=author_email,
+                    created=created,
+                    updated=updated,
+                    is_sync_comment=is_sync_comment,
+                    original_author=original_author,
+                    sync_source_id=sync_source_id,
+                )
+            )
+
+        return comments
+
+    def _extract_text_from_adf(self, adf_content: dict[str, Any]) -> str:
+        """Extract plain text from Atlassian Document Format."""
+        if not isinstance(adf_content, dict):
+            return str(adf_content)
+
+        content = adf_content.get("content", [])
+        text_parts = []
+
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "paragraph":
+                    paragraph_content = item.get("content", [])
+                    for text_item in paragraph_content:
+                        if text_item.get("type") == "text":
+                            text_parts.append(text_item.get("text", ""))
+                elif item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+
+        return " ".join(text_parts)
+
+    def _is_sync_comment(self, body: str) -> bool:
+        """Check if a comment was created by the sync system."""
+        return body.strip().startswith("[JIRA-SYNC]")
+
+    def _extract_original_author(self, body: str) -> str | None:
+        """Extract original author from sync comment."""
+        match = re.search(r"\[JIRA-SYNC\] Original author: (.+?)\n", body)
+        return match.group(1) if match else None
+
+    def _extract_sync_source_id(self, body: str) -> str | None:
+        """Extract source comment ID from sync comment."""
+        match = re.search(r"\[JIRA-SYNC\] Source ID: (.+?)\n", body)
+        return match.group(1) if match else None
+
+    def get_comments(self, issue_key: str) -> list[JiraComment]:
+        """Get all comments for an issue."""
+        logger.info("Getting comments for issue", issue_key=issue_key)
+
+        data = self._make_request("GET", f"issue/{issue_key}/comment")
+        comments_data = data.get("comments", [])
+
+        return self._parse_comments(comments_data)
+
+    def add_comment(self, issue_key: str, body: str) -> JiraComment:
+        """Add a comment to an issue."""
+        logger.info("Adding comment to issue", issue_key=issue_key)
+
+        comment_data = {
+            "body": {
+                "type": "doc",
+                "version": 1,
+                "content": [{"type": "paragraph", "content": [{"type": "text", "text": body}]}],
+            }
+        }
+
+        response = self._make_request("POST", f"issue/{issue_key}/comment", data=comment_data)
+
+        # Get the created comment with full details
+        comment_id = response["id"]
+        return self.get_comment(issue_key, comment_id)
+
+    def get_comment(self, issue_key: str, comment_id: str) -> JiraComment:
+        """Get a specific comment."""
+        logger.info("Getting comment", issue_key=issue_key, comment_id=comment_id)
+
+        data = self._make_request("GET", f"issue/{issue_key}/comment/{comment_id}")
+        return self._parse_comments([data])[0]
+
+    def update_comment(self, issue_key: str, comment_id: str, body: str) -> JiraComment:
+        """Update a comment."""
+        logger.info("Updating comment", issue_key=issue_key, comment_id=comment_id)
+
+        comment_data = {
+            "body": {
+                "type": "doc",
+                "version": 1,
+                "content": [{"type": "paragraph", "content": [{"type": "text", "text": body}]}],
+            }
+        }
+
+        self._make_request("PUT", f"issue/{issue_key}/comment/{comment_id}", data=comment_data)
+        return self.get_comment(issue_key, comment_id)
+
+    def delete_comment(self, issue_key: str, comment_id: str) -> None:
+        """Delete a comment."""
+        logger.info("Deleting comment", issue_key=issue_key, comment_id=comment_id)
+        self._make_request("DELETE", f"issue/{issue_key}/comment/{comment_id}")
+
+    def create_sync_comment(
+        self, issue_key: str, original_comment: JiraComment, source_instance_name: str
+    ) -> JiraComment:
+        """Create a sync comment with original author attribution."""
+        sync_body = (
+            f"[JIRA-SYNC] Original author: {original_comment.author_name}"
+            f"{f' ({original_comment.author_email})' if original_comment.author_email else ''}\n"
+            f"[JIRA-SYNC] Source ID: {original_comment.id}\n"
+            f"[JIRA-SYNC] From: {source_instance_name}\n"
+            f"[JIRA-SYNC] Created: {original_comment.created.strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+            f"---\n\n"
+            f"{original_comment.body}"
+        )
+
+        return self.add_comment(issue_key, sync_body)
 
     def convert_to_create_payload(self, issue: JiraIssue) -> dict[str, Any]:
         """Convert JiraIssue to JIRA create payload format."""
