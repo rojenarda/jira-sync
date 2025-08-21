@@ -324,6 +324,10 @@ class JiraClient:
         comments = []
 
         for comment_data in comments_data:
+            # Check if it is a public comment, if not, skip
+            if not comment_data.get("jsdPublic", True):
+                continue
+
             # Extract comment body (handle both string and ADF format)
             body = comment_data.get("body", "")
             if isinstance(body, dict):
@@ -421,12 +425,13 @@ class JiraClient:
         comment_id = response["id"]
         return self.get_comment(issue_key, comment_id)
 
-    def get_comment(self, issue_key: str, comment_id: str) -> JiraComment:
+    def get_comment(self, issue_key: str, comment_id: str) -> JiraComment | None:
         """Get a specific comment."""
         logger.info("Getting comment", issue_key=issue_key, comment_id=comment_id)
 
         data = self._make_request("GET", f"issue/{issue_key}/comment/{comment_id}")
-        return self._parse_comments([data])[0]
+        parsed_comments = self._parse_comments([data])
+        return parsed_comments[0] if len(parsed_comments) > 0 else None
 
     def update_comment(self, issue_key: str, comment_id: str, body: str) -> JiraComment:
         """Update a comment."""

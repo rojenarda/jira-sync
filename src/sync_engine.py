@@ -555,6 +555,9 @@ class SyncEngine:
             # Get the source comment
             try:
                 source_comment = source_client.get_comment(issue_key, comment_id)
+                if not source_comment:
+                    logger.warning("Source comment not public or not found, skipping", comment_id=comment_id)
+                    return True
             except JiraAPIError as e:
                 if "comment not found" in str(e).lower():
                     logger.info("Source comment deleted, handling as deletion", comment_id=comment_id)
